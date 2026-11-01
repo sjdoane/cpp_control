@@ -59,6 +59,7 @@ class G1SonicNode : public G1Node {
   void on_gamepad() override;
 #endif
   bool allow_policy_entry() override;
+  const std::vector<float>& nominal_target() const override;
 
   /// One manifest term bound to its slice of a session input buffer.
   struct Binding {
@@ -154,6 +155,14 @@ class G1SonicNode : public G1Node {
   // prep: stand mode driving a lead-in clip instead of the nominal one
   bool prep_active_ = false;  ///< stand_motion_ is the lead-in, not nominal
   bool prepped_ = false;      ///< lead-in played out — A is armed
+  /// A starts the clip from X's joint PD hold on its first frame, for a policy
+  /// that never trained a stand. Replaces the RB/L1 path; RB still works, but
+  /// A is refused from there.
+  bool pd_hold_entry_ = false;
+  bool pd_hold_armed_ = false;
+  double pd_hold_max_err_ = 0.25;
+  double pd_hold_max_tilt_ = 0.1;
+  mutable std::vector<float> pd_hold_target_;
   bool prev_l1_ = false;
   double prep_rate_ = 1.5;  ///< rad/s: max |dq| sets the ramp duration
   double prep_min_s_ = 0.5;
@@ -213,6 +222,8 @@ class G1SonicNode : public G1Node {
 
   rclcpp::Time last_policy_tick_;
   bool motion_end_logged_ = false;
+  g1::MotionEndGate motion_end_gate_;
+  float action_clip_ = 0.0f;  ///< manifest action.clip_actions; 0 = no clip
 
   /// Deferred-bind hook: a subclass constructor passes bind_now=false, adds
   /// its own state, then calls bind_ports() itself (virtual make_binding

@@ -62,6 +62,10 @@ G1VibeSonicNode::G1VibeSonicNode(const std::string& node_name)
   }
   stale_ticks_ =
       static_cast<int>(this->declare_parameter("token_stale_ticks", 5));
+  // A basketball clip is finite and the policy never saw its last frame held,
+  // so hand back to the nominal stand. Other families keep the stock hold.
+  motion_end_gate_ = g1::MotionEndGate(this->declare_parameter(
+      "motion_end_hold_s", task_profile_.family == "bball" ? 1.0 : -1.0));
 
   // kv port shape (P, D) is the manifest's truth about the trained encoder
   const auto* kv = manifest_.find_group("kv_tokens");
@@ -152,9 +156,16 @@ G1VibeSonicNode::G1VibeSonicNode(const std::string& node_name)
               token_rows_, token_dim_, tokens_topic.c_str(),
               encoder_tag_.c_str(), queries.str().c_str(),
               attn_name_.empty() ? "(absent)" : attn_topic.c_str());
+  if (pd_hold_entry_ && (planner_ || !task_profile_.requires_prep))
+    throw std::runtime_error(
+        "g1_vibe: pd_hold_entry needs one fixed clip on a clock");
   if (planner_) {
     RCLCPP_INFO(this->get_logger(),
                 "the planner safety gate: RB locks nominal stand; A arms rollout");
+  } else if (pd_hold_entry_) {
+    RCLCPP_INFO(this->get_logger(),
+                "hold gate ON: X holds the clip's first frame under joint PD "
+                "-> A runs the clip (no policy stand)");
   } else if (task_profile_.requires_prep) {
     RCLCPP_INFO(this->get_logger(),
                 "prep gate ON: RB stand -> L1 ramp onto the clip's first frame "
@@ -233,6 +244,14 @@ G1SonicNode::Binding G1VibeSonicNode::make_binding(
                         motion_->object_goal_pos.end(), v);
             }};
 
+  // Basketball mode: the same per-frame index feeds the adapter and the query.
+  if ((has_group(port, "augmentation") || has_group(port, "q_task_cmd")) &&
+      spec.name == "mode_onehot")
+    return {dst, &spec, [this, dim = spec.dim](float* v) {
+              vibe::write_mode_onehot(
+                  active_motion_->mode(active_clock_->frame()), dim, v);
+            }};
+
   // augmentation: the planner command stream (orcs robot_motion_cmd_terms)
   if (has_group(port, "augmentation")) {
     if (spec.name == "bodywise_contact_cmd")
@@ -285,6 +304,10 @@ bool G1VibeSonicNode::motion_contract_ready() const {
   if (task_profile_.requires_twist && !motion_->has_twist) return false;
   if (task_profile_.goal == vibe::GoalKind::OBJECT_POSE &&
       !motion_->has_object_goal)
+    return false;
+  if (task_profile_.family == "bball" &&
+      (!motion_->has_contact || !motion_->has_modes ||
+       motion_->mode_names != manifest_.mode_names))
     return false;
   return true;
 }

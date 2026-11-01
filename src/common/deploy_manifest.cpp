@@ -2,6 +2,8 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <stdexcept>
 
@@ -23,6 +25,12 @@ std::vector<float> as_float_vector(const YAML::Node& node,
 }
 
 }  // namespace
+
+void clip_actions(float* actions, int count, float limit) {
+  if (limit <= 0.0f) return;
+  for (int i = 0; i < count; ++i)
+    actions[i] = std::min(limit, std::max(-limit, actions[i]));
+}
 
 int PortSpec::dim() const {
   int d = 1;
@@ -59,6 +67,12 @@ DeployManifest DeployManifest::load(const std::string& path) {
   m.action.default_joint_pos = as_float_vector(action["default_joint_pos"], nj);
   m.action.stiffness = as_float_vector(action["stiffness"], nj);
   m.action.damping = as_float_vector(action["damping"], nj);
+  m.action.clip_actions = action["clip_actions"].as<float>(0.0f);
+  if (!std::isfinite(m.action.clip_actions) || m.action.clip_actions < 0.0f)
+    throw std::runtime_error("deploy manifest: invalid action.clip_actions in " +
+                             path);
+  for (const auto& n : root["mode_names"])
+    m.mode_names.push_back(n.as<std::string>());
 
   for (const auto& in : root["inputs"]) {
     PortSpec port;

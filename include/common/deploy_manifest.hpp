@@ -44,7 +44,13 @@ struct ActionSpec {
   std::vector<float> default_joint_pos;
   std::vector<float> stiffness;
   std::vector<float> damping;
+  /// Training's rsl_rl clip_actions. 0 = the export declares no clip. Clamps
+  /// the raw network output BEFORE the PD target and BEFORE action history.
+  float clip_actions = 0.0f;
 };
+
+/// Clamp actions to [-limit, limit] in place. limit <= 0 means no clip.
+void clip_actions(float* actions, int count, float limit);
 
 /// Parsed `<model>.manifest.json` (schema vibe.onnx.v1). JSON ⊂ YAML, parsed
 /// via yaml-cpp — no extra dependency. See vibe/deploy/onnx_manifest.py.
@@ -59,6 +65,8 @@ struct DeployManifest {
   ActionSpec action;
   std::vector<PortSpec> inputs;
   std::vector<std::string> outputs;
+  /// Index order of a `mode_onehot` term; empty for tasks that have none.
+  std::vector<std::string> mode_names;
 
   static DeployManifest load(const std::string& path);
 

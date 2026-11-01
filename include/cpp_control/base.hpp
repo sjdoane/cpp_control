@@ -82,6 +82,8 @@ protected:
     RobotCommand zeroing_control();
     RobotCommand damping_control();
     RobotCommand nominal_pose_control();
+    /// The pose nominal_pose_control ramps to and holds.
+    virtual const std::vector<float>& nominal_target() const { return default_angles_; }
     RobotCommand standing_up_control();  // interpolate → default, then auto-switch to POLICY
 
     // --- State shared across all levels ---

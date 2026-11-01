@@ -54,6 +54,15 @@ void validate_tiling(const deploy::PortSpec& port) {
 
 }  // namespace
 
+void write_mode_onehot(int mode, int dim, float* out) {
+  if (mode < 0 || mode >= dim)
+    throw std::runtime_error("g1_vibe: mode " + std::to_string(mode) +
+                             " outside mode_onehot width " +
+                             std::to_string(dim));
+  std::fill(out, out + dim, 0.0f);
+  out[mode] = 1.0f;
+}
+
 const char* cube_color_name(int index) {
   static const char* kNames[NUM_CUBE_COLORS] = {"red",    "orange", "green",
                                                 "yellow", "blue",   "pink"};
@@ -66,6 +75,7 @@ TaskProfile profile_from_task_id(const std::string& task_id) {
       {"uolm", {"uolm", GoalKind::OBJECT_POSE, true, true, true, false}},
       {"perloco", {"perloco", GoalKind::NONE, true, true, true, false}},
       {"dodge", {"dodge", GoalKind::NONE, false, false, false, true}},
+      {"bball", {"bball", GoalKind::NONE, true, true, true, false}},
   };
   const std::string id = lowered(task_id);
   const TaskProfile* found = nullptr;
@@ -80,7 +90,7 @@ TaskProfile profile_from_task_id(const std::string& task_id) {
   if (!found)
     throw std::runtime_error("g1_vibe: manifest task_id '" + task_id +
                              "' names no known task family "
-                             "(repose | uolm | perloco | dodge)");
+                             "(repose | uolm | perloco | dodge | bball)");
   return *found;
 }
 
@@ -140,6 +150,26 @@ void validate_contract(const deploy::DeployManifest& manifest,
         manifest.find_group("q_task_cmd"))
       throw std::runtime_error(
           "g1_vibe: Dodge export must have no command stream");
+  } else if (profile.family == "bball") {
+    const auto* augmentation = manifest.find_group("augmentation");
+    const auto* task = manifest.find_group("q_task_cmd");
+    require_terms(augmentation, "augmentation",
+                  {"bodywise_contact_cmd", "robot_root_lin_vel_cmd",
+                   "robot_root_ang_vel_cmd", "mode_onehot"});
+    require_terms(task, "q_task_cmd", {"mode_onehot"});
+    // Training clamps to clip_actions before the PD target and action history;
+    // an export that does not declare it would deploy a different actuator law.
+    if (manifest.action.clip_actions <= 0.0f)
+      throw std::runtime_error(
+          "g1_vibe: bball export must declare action.clip_actions");
+    if (manifest.mode_names.size() != NUM_BBALL_MODES)
+      throw std::runtime_error("g1_vibe: bball export must declare " +
+                               std::to_string(NUM_BBALL_MODES) +
+                               " mode_names");
+    if (augmentation->terms.back().dim != NUM_BBALL_MODES ||
+        task->terms.back().dim != NUM_BBALL_MODES)
+      throw std::runtime_error("g1_vibe: bball mode_onehot must be " +
+                               std::to_string(NUM_BBALL_MODES) + " wide");
   }
 
   const auto queries = query_groups(manifest);

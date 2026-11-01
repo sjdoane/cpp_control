@@ -33,6 +33,13 @@ struct TaskProfile {
   bool stand_reactive = false;
 };
 
+/// Basketball reference modes: approach hold dribble gather shot flight.
+constexpr int NUM_BBALL_MODES = 6;
+
+/// Write the one-hot of `mode` into out[dim]. Out-of-range throws: a dropped
+/// or misindexed mode must not reach the actor as a silent all-zero vector.
+void write_mode_onehot(int mode, int dim, float* out);
+
 /// Family by case-insensitive substring; the rest of the id names the
 /// architecture, which validate_contract checks structurally instead.
 TaskProfile profile_from_task_id(const std::string& task_id);

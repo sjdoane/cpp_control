@@ -103,10 +103,11 @@ RobotCommand BaseNode::nominal_pose_control()
     int n = num_motors();
     RobotCommand cmd;
     cmd.motor_commands.resize(n);
+    const auto& target = nominal_target();
     for (int i = 0; i < n; ++i)
     {
         cmd.motor_commands[i].q =
-            (1.0f - alpha_) * pre_nominal_pos_[i] + alpha_ * default_angles_[i];
+            (1.0f - alpha_) * pre_nominal_pos_[i] + alpha_ * target[i];
         cmd.motor_commands[i].kp = kps_[i];
         cmd.motor_commands[i].kd = kds_[i];
     }

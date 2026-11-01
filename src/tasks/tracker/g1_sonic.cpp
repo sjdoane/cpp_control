@@ -91,6 +91,9 @@ void G1SonicNode::construct(bool bind_now) {
   prep_min_s_ = this->declare_parameter("prep_min_s", 0.5);
   prep_max_s_ = this->declare_parameter("prep_max_s", 2.0);
   prep_joints_name_ = this->declare_parameter("prep_joints", "arms");
+  pd_hold_entry_ = this->declare_parameter("pd_hold_entry", false);
+  pd_hold_max_err_ = this->declare_parameter("pd_hold_max_err", 0.25);
+  pd_hold_max_tilt_ = this->declare_parameter("pd_hold_max_tilt", 0.1);
   if (prep_joints_name_ == "arms")
     prep_joints_ = g1::ARM_JOINT_INDICES;
   else if (prep_joints_name_ == "arms_waist") {
@@ -443,6 +446,7 @@ void G1SonicNode::on_button_a() {
   }
   stand_mode_ = false;
   pending_engage_ = true;
+  pd_hold_armed_ = false;
   restore_stand_reference();  // consume prep only after entry was accepted
 }
 
@@ -728,6 +732,7 @@ void G1SonicNode::apply_manifest_action_meta() {
     kds_[i] = a.damping[i];
     action_scale_[i] = a.scale[i];
   }
+  action_clip_ = a.clip_actions;
 }
 
 // ── Port binding ─────────────────────────────────────────────────
@@ -935,6 +940,7 @@ void G1SonicNode::engage_reset(bool reset_history) {
     std::fill(policy_actions_.begin(), policy_actions_.end(), 0.0f);
   }
   motion_end_logged_ = false;
+  motion_end_gate_.reset();
   if (!reset_history) return;
   if (stand_mode_)
     RCLCPP_INFO(this->get_logger(),
@@ -1009,6 +1015,7 @@ RobotCommand G1SonicNode::policy_control() {
   session_->run();
   const float* act = session_->output(output_name_);
   std::memcpy(policy_actions_.data(), act, G1_NUM_MOTOR * sizeof(float));
+  deploy::clip_actions(policy_actions_.data(), G1_NUM_MOTOR, action_clip_);
   std::copy(policy_actions_.begin(), policy_actions_.end(), actions_.begin());
   std::copy(policy_actions_.begin(), policy_actions_.end(),
             last_actions_.begin());
@@ -1026,6 +1033,10 @@ RobotCommand G1SonicNode::policy_control() {
   if (!stand_mode_ && active_clock_->finished() && !motion_end_logged_) {
     motion_end_logged_ = true;
     RCLCPP_INFO(this->get_logger(), "motion finished — holding last frame");
+  }
+  if (!stand_mode_ && motion_end_gate_.step(active_clock_->finished(), dt)) {
+    RCLCPP_INFO(this->get_logger(), "clip end hold elapsed — nominal stand");
+    enter_stand();
   }
 
   if (prep_active_ && !prepped_ && stand_clock_->finished()) {
@@ -1063,8 +1074,37 @@ void G1SonicNode::on_joy_input(sensor_msgs::msg::Joy::SharedPtr msg) {
   manual_walk_have_input_ = true;
 }
 
+const std::vector<float>& G1SonicNode::nominal_target() const {
+  if (!pd_hold_entry_ || !motion_) return default_angles_;
+  const int f = std::clamp(start_frame_, 0, motion_->num_frames - 1);
+  pd_hold_target_.assign(motion_->jp(f), motion_->jp(f) + G1_NUM_MOTOR);
+  return pd_hold_target_;
+}
+
 bool G1SonicNode::allow_policy_entry() {
-  if (requires_prep() && !prepped_) {
+  if (pd_hold_entry_) {
+    // joy_callback asks from NOMINAL_POSE; on_button_a asks again on the same
+    // press, already in POLICY. From a policy stand it stays refused.
+    if (control_mode_ != ControlMode::POLICY) {
+      pd_hold_armed_ = false;
+      if (control_mode_ == ControlMode::NOMINAL_POSE && motion_contract_ready()) {
+        const auto& target = nominal_target();
+        pd_hold_armed_ = g1::pd_hold_settled(
+            alpha_, robot_state_.joint_positions.data(), target.data(),
+            G1_NUM_MOTOR, static_cast<float>(pd_hold_max_err_),
+            robot_state_.imu_quaternion, static_cast<float>(pd_hold_max_tilt_));
+      }
+    }
+    if (!pd_hold_armed_) {
+      RCLCPP_WARN_THROTTLE(
+          this->get_logger(), *this->get_clock(), 500,
+          "policy entry refused — X to hold frame %d, wait for the posture, "
+          "stay upright (alpha %.2f, max err %.2f rad, max tilt %.2f rad)",
+          start_frame_, static_cast<double>(alpha_), pd_hold_max_err_,
+          pd_hold_max_tilt_);
+      return false;
+    }
+  } else if (requires_prep() && !prepped_) {
     RCLCPP_WARN_THROTTLE(
         this->get_logger(), *this->get_clock(), 2000,
         "policy entry refused — RB to stand, then L1 to prep frame %d",

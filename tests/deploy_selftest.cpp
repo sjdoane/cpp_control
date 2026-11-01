@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -423,6 +424,18 @@ static void clip_report(const std::string& motion_path)
         std::printf("  %-26s %4d/%d frames\n", g1::CONTACT_GRAPH_BODIES[k].c_str(), n,
                     m.num_frames);
     }
+    if (m.has_modes)
+        for (size_t k = 0; k < m.mode_names.size(); ++k)
+        {
+            int first = -1, n = 0;
+            for (int f = 0; f < m.num_frames; ++f)
+                if (m.mode(f) == static_cast<int>(k))
+                {
+                    if (first < 0) first = f;
+                    ++n;
+                }
+            std::printf("  mode %-22s %4d frames, first %d\n", m.mode_names[k].c_str(), n, first);
+        }
     for (int f : {0, m.num_frames / 2, m.num_frames - 1})
     {
         std::printf("  contact[%4d] =", f);
@@ -525,6 +538,212 @@ static bool throws(const std::string& p)
     }
 }
 
+// ── Basketball: family, contract, mode stream, action clip, clip end ─
+
+static std::string bball_manifest(const std::string& augmentation_terms, int augmentation_dim,
+                                  const std::string& query_term, int query_dim,
+                                  const std::string& action_extra, const std::string& mode_names)
+{
+    const std::string path = tmp_path("g1_sonic_selftest_bball.json");
+    std::ofstream f(path);
+    f << R"({"schema": "vibe.onnx.v1", "task_id": "Bball-Room-Clock-Vision",
+      "model_class": "ExtractorSonicAdapterModel", "checkpoint": "x.pt",
+      "control": {"step_dt": 0.02},
+      "action": {"joint_names": ["j0"], "scale": 0.25, "default_joint_pos": [0.0],
+                 "stiffness": [1.0], "damping": [1.0])" << action_extra << R"(},
+      "mode_names": )" << mode_names << R"(,
+      "inputs": [
+        {"name": "tokenizer", "shape": [640], "groups": ["tokenizer"],
+         "terms": [{"name": "g1_tokenizer", "shape": [640], "dim": 640, "offset": 0}]},
+        {"name": "policy", "shape": [5], "groups": ["policy"],
+         "terms": [{"name": "base_ang_vel", "shape": [1], "dim": 1, "offset": 0},
+                   {"name": "joint_pos", "shape": [1], "dim": 1, "offset": 1},
+                   {"name": "joint_vel", "shape": [1], "dim": 1, "offset": 2},
+                   {"name": "actions", "shape": [1], "dim": 1, "offset": 3},
+                   {"name": "gravity_dir", "shape": [1], "dim": 1, "offset": 4}]},
+        {"name": "augmentation", "shape": [)" << augmentation_dim << R"(], "groups": ["augmentation"],
+         "terms": [)" << augmentation_terms << R"(]},
+        {"name": "kv_tokens__img_tokens", "shape": [21, 192], "groups": ["kv_tokens"],
+         "terms": [{"name": "img_tokens", "shape": [21, 192], "dim": 4032, "offset": 0}]},
+        {"name": "q_task_cmd", "shape": [)" << query_dim << R"(], "groups": ["q_task_cmd"],
+         "terms": [{"name": ")" << query_term << R"(", "shape": [)" << query_dim
+      << R"(], "dim": )" << query_dim << R"(, "offset": 0}]},
+        {"name": "q_proprio", "shape": [4], "groups": ["q_proprio"],
+         "terms": [{"name": "projected_gravity", "shape": [1], "dim": 1, "offset": 0},
+                   {"name": "base_ang_vel", "shape": [1], "dim": 1, "offset": 1},
+                   {"name": "joint_pos", "shape": [1], "dim": 1, "offset": 2},
+                   {"name": "joint_vel", "shape": [1], "dim": 1, "offset": 3}]},
+        {"name": "q_cls", "shape": [192], "groups": ["q_cls"],
+         "terms": [{"name": "img_cls", "shape": [192], "dim": 192, "offset": 0}]}
+      ],
+      "outputs": ["actions", "attn"]})";
+    return path;
+}
+
+static void test_bball()
+{
+    namespace fs = std::filesystem;
+    const std::string names = R"(["approach","hold","dribble","gather","shot","flight"])";
+    const std::string commands =
+        R"({"name": "bodywise_contact_cmd", "shape": [12], "dim": 12, "offset": 0},
+           {"name": "robot_root_lin_vel_cmd", "shape": [3], "dim": 3, "offset": 12},
+           {"name": "robot_root_ang_vel_cmd", "shape": [3], "dim": 3, "offset": 15})";
+    const std::string with_mode =
+        commands + R"(, {"name": "mode_onehot", "shape": [6], "dim": 6, "offset": 18})";
+    const std::string clip = R"(, "clip_actions": 80.0)";
+    auto rejected = [](const std::string& path) {
+        auto m = deploy::DeployManifest::load(path);
+        try
+        {
+            vibe::validate_contract(m, vibe::profile_from_task_id(m.task_id));
+        }
+        catch (const std::runtime_error&)
+        {
+            return true;
+        }
+        return false;
+    };
+
+    // Positive: the exact exported contract.
+    auto m = deploy::DeployManifest::load(
+        bball_manifest(with_mode, 24, "mode_onehot", 6, clip, names));
+    const auto profile = vibe::profile_from_task_id(m.task_id);
+    CHECK(profile.family == "bball" && profile.requires_motion && profile.requires_prep &&
+          profile.requires_twist && !profile.stand_reactive);
+    vibe::validate_contract(m, profile);
+    CHECK(m.action.clip_actions == 80.f && m.mode_names.size() == 6 && m.mode_names[5] == "flight");
+
+    // Negative: dropping the mode from either port must not start the policy.
+    CHECK(rejected(bball_manifest(commands, 18, "mode_onehot", 6, clip, names)));
+    CHECK(rejected(bball_manifest(with_mode, 24, "object_goal_color", 6, clip, names)));
+    // Negative: an export without the training clip would change the actuator law.
+    CHECK(rejected(bball_manifest(with_mode, 24, "mode_onehot", 6, "", names)));
+    // Negative: wrong legend length, wrong one-hot width.
+    CHECK(rejected(bball_manifest(with_mode, 24, "mode_onehot", 6, clip, R"(["approach"])")));
+    CHECK(rejected(bball_manifest(with_mode, 24, "mode_onehot", 5, clip, names)));
+    // A family name that is not basketball does not take the bball branch.
+    CHECK(vibe::profile_from_task_id("Perloco-x").family != "bball");
+
+    // One-hot writer: exactly one hot, and an out-of-range mode throws.
+    std::array<float, 6> hot;
+    hot.fill(9.f);
+    vibe::write_mode_onehot(4, 6, hot.data());
+    for (int i = 0; i < 6; ++i) CHECK(hot[i] == (i == 4 ? 1.f : 0.f));
+    for (int bad : {-1, 6})
+    {
+        bool threw = false;
+        try
+        {
+            vibe::write_mode_onehot(bad, 6, hot.data());
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // Modes: stand has none and reads index 0; validated setter; bad inputs throw.
+    auto stand = g1::Motion::stand(std::vector<float>(29, 0.f));
+    CHECK(!stand.has_modes && stand.mode(0) == 0);
+    auto wrong = [&](std::vector<int8_t> frames, std::vector<std::string> legend) {
+        try
+        {
+            stand.set_modes(std::move(frames), std::move(legend));
+        }
+        catch (const std::runtime_error&)
+        {
+            return true;
+        }
+        return false;
+    };
+    CHECK(wrong({0, 0}, {"a"}));   // wrong length
+    CHECK(wrong({1}, {"a"}));      // index outside the legend
+    CHECK(wrong({-1}, {"a"}));     // negative index
+    CHECK(!stand.has_modes);       // a rejected install leaves no modes behind
+    stand.set_modes({0}, {"a"});
+    CHECK(stand.has_modes && stand.mode_names[0] == "a");
+
+    // Sidecar on disk: missing legend throws, absent leaves has_modes false.
+    const fs::path dir = fs::temp_directory_path() / "g1_sonic_selftest_modes";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string clip_path = (dir / "motion.npz").string();
+    std::vector<float> jp(6, 0.f), bq = {1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f};
+    cnpy::npz_save(clip_path, "joint_pos", jp.data(), {2, 3}, "w");
+    cnpy::npz_save(clip_path, "joint_vel", jp.data(), {2, 3}, "a");
+    cnpy::npz_save(clip_path, "body_quat_w", bq.data(), {2, 1, 4}, "a");
+    CHECK(!g1::Motion::from_npz(clip_path).has_modes);
+    std::vector<int8_t> frames = {0, 1};
+    cnpy::npz_save((dir / "modes.npz").string(), "modes", frames.data(), {2}, "w");
+    bool missing_legend = false;
+    try
+    {
+        g1::Motion::from_npz(clip_path);
+    }
+    catch (const std::runtime_error&)
+    {
+        missing_legend = true;
+    }
+    CHECK(missing_legend);
+    // A source without companions never picks up a stray sidecar.
+    CHECK(!g1::Motion::from_npz(clip_path, {}, /*load_companions=*/false).has_modes);
+    // A column-major array must throw, never load as scrambled joints. Same-width
+    // header edit; cnpy does not check the zip CRC.
+    {
+        std::ifstream in(clip_path, std::ios::binary);
+        std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string key = "'fortran_order': False";
+        const auto at = bytes.find(key);
+        CHECK(at != std::string::npos);
+        bytes.replace(at, key.size(), "'fortran_order': True ");
+        std::ofstream(clip_path, std::ios::binary | std::ios::trunc) << bytes;
+        bool threw = false;
+        try
+        {
+            g1::Motion::from_npz(clip_path, {}, /*load_companions=*/false);
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+    fs::remove_all(dir);
+
+    // Clip: clamps both signs; limit 0 is the stock no-clip for other families.
+    float raw[3] = {-200.f, 3.f, 90.f};
+    deploy::clip_actions(raw, 3, 0.f);
+    CHECK(raw[0] == -200.f && raw[2] == 90.f);
+    deploy::clip_actions(raw, 3, 80.f);
+    CHECK(raw[0] == -80.f && raw[1] == 3.f && raw[2] == 80.f);
+
+    // End gate: nothing before finish, fires once after the hold, resets.
+    g1::MotionEndGate gate(0.04);
+    CHECK(!gate.step(false, 0.02));
+    CHECK(!gate.step(true, 0.02));
+    CHECK(!gate.step(true, 0.02));
+    CHECK(gate.step(true, 0.02));
+    CHECK(!gate.step(true, 0.02));
+    gate.reset();
+    CHECK(!gate.step(true, 0.02));
+    // Negative hold is the stock hold-forever.
+    // Hold entry: ramp finished, posture reached, still upright; NaN refused.
+    const std::array<float, 4> upright = {1.0f, 0.0f, 0.0f, 0.0f};
+    const std::array<float, 4> falling = {0.9659f, 0.2588f, 0.0f, 0.0f};  // 30 deg
+    const float target[2] = {0.1f, -0.2f}, near[2] = {0.2f, -0.1f}, far[2] = {0.1f, 0.2f};
+    const float bad[2] = {0.1f, std::nanf("")};
+    CHECK(g1::pd_hold_settled(1.0f, near, target, 2, 0.25f, upright, 0.1f));
+    CHECK(!g1::pd_hold_settled(0.99f, near, target, 2, 0.25f, upright, 0.1f));
+    CHECK(!g1::pd_hold_settled(1.0f, far, target, 2, 0.25f, upright, 0.1f));
+    CHECK(!g1::pd_hold_settled(1.0f, bad, target, 2, 0.25f, upright, 0.1f));
+    CHECK(!g1::pd_hold_settled(1.0f, near, target, 2, 0.25f, falling, 0.1f));
+
+    g1::MotionEndGate forever;
+    for (int i = 0; i < 1000; ++i) CHECK(!forever.step(true, 0.02));
+    std::puts("ok  bball contract, modes, clip, clip end, hold entry");
+}
+
 static void test_asset_path()
 {
     namespace fs = std::filesystem;
@@ -576,6 +795,7 @@ int main(int argc, char** argv)
     test_motion();
     test_joint_orders();
     test_tokenizer_layout();
+    test_bball();
     test_asset_path();
 
     std::vector<std::string> pos;

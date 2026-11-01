@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -69,6 +71,9 @@ struct Motion {
   bool has_object_goal = false;  ///< sibling object_motion / reference envelope
   std::array<float, 3> object_goal_pos = {0.0f, 0.0f, 0.0f};
   std::array<float, 4> object_goal_quat = {1.0f, 0.0f, 0.0f, 0.0f};  ///< wxyz
+  bool has_modes = false;  ///< sibling modes.npz (absent = no per-frame mode)
+  std::vector<int8_t> modes;            ///< (T,) index into mode_names
+  std::vector<std::string> mode_names;  ///< legend carried by modes.npz
 
   std::vector<float> joint_pos;       ///< (T*J) MJ order
   std::vector<float> joint_vel;       ///< (T*J) MJ order
@@ -86,6 +91,11 @@ struct Motion {
   static Motion from_npz(const std::string& path,
                          const std::vector<int>& joint_perm = {},
                          bool load_companions = true);
+  /// Install per-frame modes. Wrong length or an index outside `names` throws:
+  /// a mislabelled mode must never fall back to a default (training's loader
+  /// rejects the same inputs).
+  void set_modes(std::vector<int8_t> frame_modes,
+                 std::vector<std::string> names);
   /// Wire rows, IL-ordered, `cols` wide — WIRE_COLS_MIN or WIRE_COLS_FULL.
   static Motion from_wire(int num_frames, const float* rows,
                           int cols = WIRE_COLS_MIN);
@@ -113,6 +123,9 @@ struct Motion {
   const float* contact(int f) const {
     return &bodywise_contact[static_cast<size_t>(f) * NUM_CONTACT_BODIES];
   }
+  /// Reference mode at a frame. A stand or lead-in has no modes: index 0, the
+  /// mode a clip opens in, which is what the actor sees before the clip starts.
+  int mode(int f) const { return has_modes ? modes[f] : 0; }
   void jp_il(int f,
              float* out) const;  ///< IL-ordered gather into out[num_joints]
   void jv_il(int f, float* out) const;
@@ -125,6 +138,47 @@ struct Motion {
   std::array<float, 3> root_ang_vel_b(
       int f, int body = 0) const;  ///< ref-anchor frame
 };
+
+/// Bounds what happens after a finite clip's last frame. The reference clamps
+/// there, so without this the robot tracks the final frame forever. Returns
+/// true once, `hold_s` after the clip finished. hold_s < 0 never fires (the
+/// stock hold-the-last-frame behaviour).
+class MotionEndGate {
+ public:
+  explicit MotionEndGate(double hold_s = -1.0) : hold_s_(hold_s) {}
+  void reset() {
+    held_s_ = 0.0;
+    fired_ = false;
+  }
+  bool step(bool finished, double dt) {
+    if (hold_s_ < 0.0 || fired_ || !finished) return false;
+    if (held_s_ >= hold_s_) return fired_ = true;
+    held_s_ += dt;
+    return false;
+  }
+
+ private:
+  double hold_s_;
+  double held_s_ = 0.0;
+  bool fired_ = false;
+};
+
+/// A may start a clip from a joint PD hold only once the ramp onto its first
+/// frame has finished, the measured posture reached it and the robot is still
+/// upright: joint PD does not balance, and a falling robot holds its posture.
+/// NaN fails closed.
+inline bool pd_hold_settled(float alpha, const float* q, const float* target,
+                            int n, float max_err,
+                            const std::array<float, 4>& imu_wxyz,
+                            float max_tilt) {
+  if (alpha < 1.0f) return false;
+  const float up = 1.0f - 2.0f * (imu_wxyz[1] * imu_wxyz[1] +
+                                  imu_wxyz[2] * imu_wxyz[2]);
+  if (!(up >= std::cos(max_tilt))) return false;
+  for (int i = 0; i < n; ++i)
+    if (!(std::fabs(q[i] - target[i]) <= max_err)) return false;
+  return true;
+}
 
 /// Playback clock + heading alignment over a Motion — the one `t` every
 /// consumer samples through.

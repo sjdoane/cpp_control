@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <utility>
 
 #include "cnpy/cnpy.h"
 #include "common/g1/joint_orders.hpp"
@@ -18,6 +19,10 @@ namespace {
 
 /// npz arrays may be float32 or float64; normalize to float32.
 std::vector<float> to_floats(const cnpy::NpyArray& arr) {
+  // cnpy keeps the raw bytes and never reorders: a column-major array would
+  // load as silently wrong per-joint data (reference82's joint_vel is one).
+  if (arr.fortran_order)
+    throw std::runtime_error("Motion: Fortran-order npz array; re-save in C order");
   std::vector<float> out(arr.num_vals);
   if (arr.word_size == sizeof(float)) {
     const float* p = arr.data<float>();
@@ -63,7 +68,7 @@ std::vector<float> load_contact(const std::string& motion_path,
         path);
   const auto& mat = npz.at("matrix");
   const auto names = to_strings(npz.at("body_names"));
-  if (mat.shape.size() != 3 || mat.word_size != 1)
+  if (mat.shape.size() != 3 || mat.word_size != 1 || mat.fortran_order)
     throw std::runtime_error("Motion: contact matrix must be (T, N, N) int8: " +
                              path);
   if (static_cast<int>(mat.shape[0]) != num_frames)
@@ -95,6 +100,27 @@ std::vector<float> load_contact(const std::string& motion_path,
       out[t * cols.size() + k] = row[cols[k]] != 0 ? 1.0f : 0.0f;
   }
   return out;
+}
+
+/// Per-frame reference mode from the clip's sibling modes.npz. Absent is
+/// truthful (has_modes stays false); present but wrong throws, as training's
+/// loader does: a mislabelled mode must never fall back to a default.
+void load_modes(const std::string& motion_path, Motion& motion) {
+  const size_t slash = motion_path.find_last_of('/');
+  const std::string path =
+      (slash == std::string::npos ? "" : motion_path.substr(0, slash + 1)) +
+      "modes.npz";
+  if (!std::ifstream(path).good()) return;
+
+  cnpy::npz_t npz = cnpy::npz_load(path);
+  if (!npz.count("modes") || !npz.count("mode_names"))
+    throw std::runtime_error("Motion: modes.npz needs 'modes' and 'mode_names': " +
+                             path);
+  const auto& arr = npz.at("modes");
+  if (arr.word_size != 1 || arr.fortran_order)
+    throw std::runtime_error("Motion: modes must be int8 in C order: " + path);
+  motion.set_modes({arr.data<int8_t>(), arr.data<int8_t>() + arr.num_vals},
+                   to_strings(npz.at("mode_names")));
 }
 
 void load_object_goal(const std::string& motion_path, Motion& motion) {
@@ -188,7 +214,10 @@ Motion Motion::from_npz(const std::string& path,
     m.bodywise_contact.assign(
         static_cast<size_t>(m.num_frames) * NUM_CONTACT_BODIES, 0.0f);
 
-  if (load_companions) load_object_goal(path, m);
+  if (load_companions) {
+    load_object_goal(path, m);
+    load_modes(path, m);
+  }
 
   if (npz.count("fps")) {
     // fps dtype varies by producer (mjlab demo: float64; retargeted dataset:
@@ -227,6 +256,22 @@ Motion Motion::from_npz(const std::string& path,
   }
 
   return m;
+}
+
+void Motion::set_modes(std::vector<int8_t> frame_modes,
+                       std::vector<std::string> names) {
+  if (static_cast<int>(frame_modes.size()) != num_frames)
+    throw std::runtime_error("Motion: " + std::to_string(frame_modes.size()) +
+                             " modes for " + std::to_string(num_frames) +
+                             " frames");
+  for (int8_t m : frame_modes)
+    if (m < 0 || static_cast<size_t>(m) >= names.size())
+      throw std::runtime_error("Motion: mode index " + std::to_string(m) +
+                               " outside a legend of " +
+                               std::to_string(names.size()));
+  modes = std::move(frame_modes);
+  mode_names = std::move(names);
+  has_modes = true;
 }
 
 Motion Motion::from_wire(int num_frames, const float* rows, int cols) {
