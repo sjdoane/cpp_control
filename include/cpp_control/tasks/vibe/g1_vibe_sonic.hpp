@@ -56,6 +56,7 @@ class G1VibeSonicNode : public G1SonicNode {
   RobotCommand policy_control() override;
   void engage_reset(bool reset_history = true) override;
   bool allow_policy_entry() override;
+  bool clip_stand_ready() override;
   void on_button_a() override;
 
  private:

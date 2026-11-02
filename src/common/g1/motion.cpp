@@ -332,6 +332,36 @@ Motion Motion::from_wire(int num_frames, const float* rows, int cols,
   return m;
 }
 
+Motion Motion::first_frame(const Motion& clip, int frame, int anchor_body) {
+  const int f = std::clamp(frame, 0, clip.num_frames - 1);
+  const int b = std::clamp(anchor_body, 0, clip.num_bodies - 1);
+  const size_t at = static_cast<size_t>(f) * clip.num_bodies + b;
+  const auto slice = [at](const std::vector<float>& v, size_t width) {
+    return std::vector<float>(v.begin() + at * width,
+                              v.begin() + (at + 1) * width);
+  };
+  Motion m;
+  m.num_frames = 1;
+  m.num_joints = clip.num_joints;
+  m.num_bodies = 1;
+  m.fps = clip.fps;
+  m.has_twist = clip.has_twist;
+  m.has_contact = clip.has_contact;
+  m.has_object_goal = clip.has_object_goal;
+  m.object_goal_pos = clip.object_goal_pos;
+  m.object_goal_quat = clip.object_goal_quat;
+  m.joint_pos.assign(clip.jp(f), clip.jp(f) + clip.num_joints);
+  m.joint_vel.assign(clip.jv(f), clip.jv(f) + clip.num_joints);
+  m.body_pos_w = slice(clip.body_pos_w, 3);
+  m.body_quat_w = slice(clip.body_quat_w, 4);
+  m.body_lin_vel_w = slice(clip.body_lin_vel_w, 3);
+  m.body_ang_vel_w = slice(clip.body_ang_vel_w, 3);
+  m.bodywise_contact.assign(clip.contact(f),
+                            clip.contact(f) + NUM_CONTACT_BODIES);
+  if (clip.has_modes) m.set_modes({clip.modes[f]}, clip.mode_names);
+  return m;
+}
+
 Motion Motion::stand(const std::vector<float>& default_angles_mj, float fps) {
   Motion m;
   m.num_frames = 1;
@@ -425,6 +455,13 @@ MotionClock::MotionClock(const Motion& motion, int anchor_body)
     : motion_(motion), anchor_body_(anchor_body) {
   if (anchor_body_ < 0 || anchor_body_ >= motion_.num_bodies)
     throw std::runtime_error("MotionClock: anchor_body out of range");
+}
+
+void MotionClock::continue_from(const MotionClock& held, int start_frame) {
+  phase_ =
+      static_cast<double>(std::clamp(start_frame, 0, motion_.num_frames - 1));
+  ref_start_pos_ = motion_.root_pos(static_cast<int>(phase_), anchor_body_);
+  heading_offset_ = held.heading_offset_;
 }
 
 void MotionClock::engage(const std::array<float, 4>& robot_quat,

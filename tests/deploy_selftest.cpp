@@ -744,6 +744,65 @@ static void test_bball()
     std::puts("ok  bball contract, modes, clip, clip end, hold entry");
 }
 
+static void test_clip_stand()
+{
+    g1::Motion clip;
+    clip.num_frames = 3;
+    clip.num_joints = 2;
+    clip.num_bodies = 2;
+    clip.has_twist = clip.has_contact = true;
+    clip.joint_pos = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f};
+    clip.joint_vel = {1.f, 2.f, 3.f, 4.f, 5.f, 6.f};
+    clip.body_pos_w.resize(3 * 2 * 3);
+    clip.body_lin_vel_w.resize(3 * 2 * 3);
+    clip.body_ang_vel_w.resize(3 * 2 * 3);
+    clip.body_quat_w.assign(3 * 2 * 4, 0.0f);
+    for (size_t i = 0; i < clip.body_pos_w.size(); ++i)
+        clip.body_pos_w[i] = static_cast<float>(i);
+    for (size_t i = 0; i < clip.body_lin_vel_w.size(); ++i)
+        clip.body_lin_vel_w[i] = 0.5f * static_cast<float>(i);
+    for (size_t i = 0; i < 3 * 2; ++i)
+        clip.body_quat_w[i * 4] = 1.0f;
+    clip.bodywise_contact.assign(3 * g1::NUM_CONTACT_BODIES, 0.0f);
+    clip.bodywise_contact[g1::NUM_CONTACT_BODIES] = 1.0f;
+    clip.set_modes({0, 2, 1}, {"a", "b", "c"});
+
+    // The held frame is the clip's frame, at the anchor body, not its neighbours.
+    const g1::Motion held = g1::Motion::first_frame(clip, 1, 1);
+    CHECK(held.num_frames == 1 && held.num_joints == 2 && held.num_bodies == 1);
+    CHECK(held.jp(0)[0] == clip.jp(1)[0] && held.jp(0)[1] == clip.jp(1)[1]);
+    CHECK(held.jv(0)[1] == clip.jv(1)[1]);
+    CHECK(held.root_pos(0) == clip.root_pos(1, 1));
+    CHECK(held.root_pos(0) != clip.root_pos(1, 0));
+    CHECK(held.root_quat(0) == clip.root_quat(1, 1));
+    CHECK(held.root_lin_vel_b(0) == clip.root_lin_vel_b(1, 1));
+    CHECK(held.contact(0)[0] == 1.0f);
+    CHECK(held.has_modes && held.mode(0) == 2 && held.mode_names == clip.mode_names);
+    CHECK(g1::Motion::first_frame(clip, 99, 99).jp(0)[0] == clip.jp(2)[0]);
+    // A stand holds no modes of its own, so a clip without them stays without.
+    clip.has_modes = false;
+    CHECK(!g1::Motion::first_frame(clip, 1, 1).has_modes);
+    clip.has_modes = true;
+
+    // Frozen on that frame: every future frame is it.
+    g1::MotionClock stand(held, 0);
+    const std::array<float, 4> east = {0.7071068f, 0.0f, 0.0f, 0.7071068f};
+    const std::array<float, 4> north = {1.0f, 0.0f, 0.0f, 0.0f};
+    stand.engage(east, 0);
+    stand.step(0.1);
+    CHECK(stand.future_frame(50) == 0);
+
+    // The handover keeps the stand's heading even if the robot has since turned;
+    // a plain engage would rebase onto the turned robot.
+    g1::MotionClock kept(clip, 1), rebased(clip, 1);
+    kept.continue_from(stand, 1);
+    rebased.engage(north, 1);
+    CHECK(kept.frame() == 1);
+    CHECK(kept.aligned_root_quat(1) == stand.aligned_root_quat(0));
+    CHECK(rebased.aligned_root_quat(1) != stand.aligned_root_quat(0));
+    std::puts("ok  clip stand");
+}
+
 static void test_asset_path()
 {
     namespace fs = std::filesystem;
@@ -796,6 +855,7 @@ int main(int argc, char** argv)
     test_joint_orders();
     test_tokenizer_layout();
     test_bball();
+    test_clip_stand();
     test_asset_path();
 
     std::vector<std::string> pos;

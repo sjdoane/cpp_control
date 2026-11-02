@@ -110,6 +110,10 @@ struct Motion {
   static Motion lead_in(const std::vector<float>& from_mj,
                         const std::vector<float>& to_mj, int num_frames,
                         float fps = 50.0f);
+  /// One frame of a clip as a held reference: joints, anchor-body root pose and
+  /// twist, contact and mode. Every future frame of it is that frame, which is
+  /// what a clock frozen on that frame shows the policy.
+  static Motion first_frame(const Motion& clip, int frame, int anchor_body = 0);
 
   // ── joint views ──
   const float* jp(int f) const {
@@ -199,6 +203,9 @@ class MotionClock {
   /// otherwise force it to zero). 0 = the plain heading rebase.
   void engage(const std::array<float, 4>& robot_quat, int start_frame = 0,
               float extra_yaw = 0.0f);
+  /// Start from a reference held on the same pose: no re-alignment, the held
+  /// clock's heading carries over.
+  void continue_from(const MotionClock& held, int start_frame = 0);
   void step(double dt);  ///< advance by fps*dt motion frames
 
   int frame() const;

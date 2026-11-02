@@ -458,7 +458,7 @@ void G1SonicNode::enter_prep() {
                 "calibration lock: L1 ignored; nominal stand stays active");
     return;
   }
-  if (!requires_prep()) {
+  if (!requires_prep() || clip_stand_entry_) {
     RCLCPP_INFO(this->get_logger(), "L1 ignored — this mode does not use clip prep");
     return;
   }
@@ -539,7 +539,9 @@ void G1SonicNode::restore_stand_reference() {
 
 void G1SonicNode::make_stand_motion() {
   stand_motion_ = std::make_unique<g1::Motion>(
-      g1::Motion::stand(default_angles_, motion_ ? motion_->fps : 50.0f));
+      clip_stand_entry_ && motion_
+          ? g1::Motion::first_frame(*motion_, start_frame_, anchor_body_)
+          : g1::Motion::stand(default_angles_, motion_ ? motion_->fps : 50.0f));
   stand_clock_ = std::make_unique<g1::MotionClock>(*stand_motion_, 0);
   rebind_active();
 }
@@ -892,7 +894,8 @@ std::array<float, 4> G1SonicNode::reference_root_quat(
 }
 
 bool G1SonicNode::stand_yaw_reference_active() const {
-  return stand_yaw_.enabled() && !calibration_lock_ && stand_mode_ &&
+  return stand_yaw_.enabled() && !clip_stand_entry_ && !calibration_lock_ &&
+         stand_mode_ &&
          !manual_walk_busy() && control_mode_ == ControlMode::POLICY;
 }
 
@@ -930,9 +933,12 @@ void G1SonicNode::rebind_active() {
 
 void G1SonicNode::engage_reset(bool reset_history) {
   rebind_active();
-  active_clock_->engage(robot_state_.imu_quaternion,
-                        stand_mode_ ? 0 : start_frame_,
-                        stand_mode_ ? 0.0f : entry_yaw_);
+  if (clip_stand_entry_ && !stand_mode_ && !reset_history)
+    active_clock_->continue_from(*stand_clock_, start_frame_);
+  else
+    active_clock_->engage(robot_state_.imu_quaternion,
+                          stand_mode_ ? 0 : start_frame_,
+                          stand_mode_ ? 0.0f : entry_yaw_);
   // A soft re-engage keeps the histories: the policy's proprio terms carry 10
   // steps and a planner swaps references far faster than that refills.
   if (reset_history) {
@@ -941,7 +947,13 @@ void G1SonicNode::engage_reset(bool reset_history) {
   }
   motion_end_logged_ = false;
   motion_end_gate_.reset();
-  if (!reset_history) return;
+  if (!reset_history) {
+    if (clip_stand_entry_ && !stand_mode_)
+      RCLCPP_INFO(this->get_logger(),
+                  "sonic engaged: track from frame %d, heading kept from the stand",
+                  start_frame_);
+    return;
+  }
   if (stand_mode_)
     RCLCPP_INFO(this->get_logger(),
                 "sonic engaged: STAND (nominal-pose reference)");
@@ -991,7 +1003,8 @@ RobotCommand G1SonicNode::policy_control() {
     // Arriving from another control mode is a cold start; a reference swap
     // inside POLICY is not — under the planner that happens every couple of
     // seconds.
-    engage_reset(/*reset_history=*/from_elsewhere || !planner_);
+    const bool unfreeze = clip_stand_entry_ && !from_elsewhere && !stand_mode_;
+    engage_reset(/*reset_history=*/from_elsewhere || (!planner_ && !unfreeze));
     pending_engage_ = false;
   }
   last_policy_tick_ = now;
@@ -1075,13 +1088,34 @@ void G1SonicNode::on_joy_input(sensor_msgs::msg::Joy::SharedPtr msg) {
 }
 
 const std::vector<float>& G1SonicNode::nominal_target() const {
-  if (!pd_hold_entry_ || !motion_) return default_angles_;
+  if ((!pd_hold_entry_ && !clip_stand_entry_) || !motion_) return default_angles_;
   const int f = std::clamp(start_frame_, 0, motion_->num_frames - 1);
   pd_hold_target_.assign(motion_->jp(f), motion_->jp(f) + G1_NUM_MOTOR);
   return pd_hold_target_;
 }
 
+bool G1SonicNode::clip_stand_ready() {
+  if (control_mode_ != ControlMode::NOMINAL_POSE || pend_ready_ ||
+      !motion_contract_ready())
+    return false;
+  const auto& target = nominal_target();
+  return g1::pd_hold_settled(
+      alpha_, robot_state_.joint_positions.data(), target.data(), G1_NUM_MOTOR,
+      static_cast<float>(pd_hold_max_err_), robot_state_.imu_quaternion,
+      static_cast<float>(pd_hold_max_tilt_));
+}
+
 bool G1SonicNode::allow_policy_entry() {
+  if (clip_stand_entry_) {
+    // joy_callback and on_button_a both ask, on the same press.
+    if (control_mode_ == ControlMode::POLICY && stand_mode_ && !pend_ready_)
+      return true;
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500,
+                         "policy entry refused — X to hold frame %d, RB to "
+                         "stand on it, then A; one clip per boot",
+                         start_frame_);
+    return false;
+  }
   if (pd_hold_entry_) {
     // joy_callback asks from NOMINAL_POSE; on_button_a asks again on the same
     // press, already in POLICY. From a policy stand it stays refused.
@@ -1162,8 +1196,19 @@ void G1SonicNode::on_joy(sensor_msgs::msg::Joy::SharedPtr msg) {
   if (l1 && !prev_l1_) enter_prep();
   prev_l1_ = l1;
   if (rb && !prev_rb_joy_) {
-    enter_stand();
-    RCLCPP_INFO(this->get_logger(), "-> stand (SONIC @ nominal)");
+    if (clip_stand_entry_ && !clip_stand_ready()) {
+      RCLCPP_WARN(this->get_logger(),
+                  "RB refused — X to hold frame %d and wait for the posture; "
+                  "a playing clip stops with Y (alpha %.2f, max err %.2f rad, "
+                  "max tilt %.2f rad)",
+                  start_frame_, static_cast<double>(alpha_), pd_hold_max_err_,
+                  pd_hold_max_tilt_);
+    } else {
+      enter_stand();
+      RCLCPP_INFO(this->get_logger(), clip_stand_entry_
+                                          ? "-> stand (SONIC @ clip frame)"
+                                          : "-> stand (SONIC @ nominal)");
+    }
   }
   prev_rb_joy_ = rb;
 

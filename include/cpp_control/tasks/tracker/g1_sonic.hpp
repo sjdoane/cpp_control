@@ -80,6 +80,7 @@ class G1SonicNode : public G1Node {
   void restore_stand_reference();
   virtual bool requires_prep() const { return !planner_ && !calibration_lock_; }
   virtual bool motion_contract_ready() const { return motion_ != nullptr; }
+  virtual bool clip_stand_ready();  ///< RB gate: only from a settled X hold
   /// `reset_history` false = soft re-engage: re-point and re-align the clock
   /// but keep observation histories and the last action (the planner reference
   /// swaps).
@@ -158,6 +159,9 @@ class G1SonicNode : public G1Node {
   /// A starts the clip from X's joint PD hold on its first frame, for a policy
   /// that never trained a stand. Replaces the RB/L1 path; RB still works, but
   /// A is refused from there.
+  /// X holds the clip's first frame, RB stands on it under the policy, A
+  /// unfreezes the clock. Training's frame-0 hold is the same sequence.
+  bool clip_stand_entry_ = false;
   bool pd_hold_entry_ = false;
   bool pd_hold_armed_ = false;
   double pd_hold_max_err_ = 0.25;

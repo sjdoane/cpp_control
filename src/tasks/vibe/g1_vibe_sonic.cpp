@@ -62,10 +62,11 @@ G1VibeSonicNode::G1VibeSonicNode(const std::string& node_name)
   }
   stale_ticks_ =
       static_cast<int>(this->declare_parameter("token_stale_ticks", 5));
-  // A basketball clip is finite and the policy never saw its last frame held,
-  // so hand back to the nominal stand. Other families keep the stock hold.
-  motion_end_gate_ = g1::MotionEndGate(this->declare_parameter(
-      "motion_end_hold_s", task_profile_.family == "bball" ? 1.0 : -1.0));
+  // Clock clips stay on the last frame after they finish: training holds it for
+  // two seconds, and a jump to another pose is something it never showed the
+  // policy. The operator damps. A hold time is opt-in.
+  motion_end_gate_ = g1::MotionEndGate(
+      this->declare_parameter("motion_end_hold_s", -1.0));
 
   // kv port shape (P, D) is the manifest's truth about the trained encoder
   const auto* kv = manifest_.find_group("kv_tokens");
@@ -159,9 +160,24 @@ G1VibeSonicNode::G1VibeSonicNode(const std::string& node_name)
   if (pd_hold_entry_ && (planner_ || !task_profile_.requires_prep))
     throw std::runtime_error(
         "g1_vibe: pd_hold_entry needs one fixed clip on a clock");
+  clip_stand_entry_ = this->declare_parameter(
+      "clip_stand_entry",
+      task_profile_.family == "bball" && !pd_hold_entry_ && !planner_);
+  if (clip_stand_entry_) {
+    if (planner_ || pd_hold_entry_ || !task_profile_.requires_prep ||
+        manual_walk_enabled_ || !motion_)
+      throw std::runtime_error(
+          "g1_vibe: clip_stand_entry needs one fixed clip on a clock, without "
+          "pd_hold_entry or stand walking");
+    make_stand_motion();
+  }
   if (planner_) {
     RCLCPP_INFO(this->get_logger(),
                 "the planner safety gate: RB locks nominal stand; A arms rollout");
+  } else if (clip_stand_entry_) {
+    RCLCPP_INFO(this->get_logger(),
+                "clip stand ON: X holds the clip's first frame under joint PD "
+                "-> RB stands on it under the policy -> A runs the clip");
   } else if (pd_hold_entry_) {
     RCLCPP_INFO(this->get_logger(),
                 "hold gate ON: X holds the clip's first frame under joint PD "
@@ -316,6 +332,10 @@ bool G1VibeSonicNode::tokens_fresh() const {
   if (!tokens_seen_) return false;
   const double dt = config_ ? config_->control_dt : 0.02;
   return (this->now() - last_token_time_).seconds() <= stale_ticks_ * dt;
+}
+
+bool G1VibeSonicNode::clip_stand_ready() {
+  return tokens_fresh() && G1SonicNode::clip_stand_ready();
 }
 
 bool G1VibeSonicNode::allow_policy_entry() {
