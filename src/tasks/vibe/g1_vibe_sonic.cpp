@@ -335,7 +335,12 @@ bool G1VibeSonicNode::tokens_fresh() const {
 }
 
 bool G1VibeSonicNode::clip_stand_ready() {
-  return tokens_fresh() && G1SonicNode::clip_stand_ready();
+  if (!tokens_fresh()) {
+    RCLCPP_WARN(this->get_logger(), "stand refused — waiting for fresh %s tokens",
+                encoder_tag_.c_str());
+    return false;
+  }
+  return G1SonicNode::clip_stand_ready();
 }
 
 bool G1VibeSonicNode::allow_policy_entry() {

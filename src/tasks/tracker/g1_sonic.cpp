@@ -1185,6 +1185,31 @@ bool G1SonicNode::allow_policy_entry() {
   return ready;
 }
 
+// RB on /joy and R1 on the Unitree remote share this gate.
+void G1SonicNode::on_stand_press() {
+  if (clip_stand_entry_ && !clip_stand_ready()) {
+    const auto& target = nominal_target();
+    double err = 0.0;
+    for (int i = 0; i < G1_NUM_MOTOR; ++i)
+      err = std::max(err, static_cast<double>(std::fabs(
+                              robot_state_.joint_positions[i] - target[i])));
+    const auto& w = robot_state_.imu_quaternion;
+    const double up = 1.0 - 2.0 * (w[1] * w[1] + w[2] * w[2]);
+    RCLCPP_WARN(this->get_logger(),
+                "RB refused — X to hold frame %d and wait for the posture; "
+                "a playing clip stops with Y (mode %d, alpha %.2f, joint err "
+                "%.2f of %.2f rad, tilt %.2f of %.2f rad)",
+                start_frame_, static_cast<int>(control_mode_),
+                static_cast<double>(alpha_), err, pd_hold_max_err_,
+                std::acos(std::clamp(up, -1.0, 1.0)), pd_hold_max_tilt_);
+    return;
+  }
+  enter_stand();
+  RCLCPP_INFO(this->get_logger(), clip_stand_entry_
+                                      ? "-> stand (SONIC @ clip frame)"
+                                      : "-> stand (SONIC @ nominal)");
+}
+
 void G1SonicNode::on_joy(sensor_msgs::msg::Joy::SharedPtr msg) {
   const bool rb =
       msg->buttons.size() > joy::XMODE_R1 && msg->buttons[joy::XMODE_R1] == 1;
@@ -1195,21 +1220,7 @@ void G1SonicNode::on_joy(sensor_msgs::msg::Joy::SharedPtr msg) {
   if (requires_prep() && rb && !prev_rb_joy_) restore_stand_reference();
   if (l1 && !prev_l1_) enter_prep();
   prev_l1_ = l1;
-  if (rb && !prev_rb_joy_) {
-    if (clip_stand_entry_ && !clip_stand_ready()) {
-      RCLCPP_WARN(this->get_logger(),
-                  "RB refused — X to hold frame %d and wait for the posture; "
-                  "a playing clip stops with Y (alpha %.2f, max err %.2f rad, "
-                  "max tilt %.2f rad)",
-                  start_frame_, static_cast<double>(alpha_), pd_hold_max_err_,
-                  pd_hold_max_tilt_);
-    } else {
-      enter_stand();
-      RCLCPP_INFO(this->get_logger(), clip_stand_entry_
-                                          ? "-> stand (SONIC @ clip frame)"
-                                          : "-> stand (SONIC @ nominal)");
-    }
-  }
+  if (rb && !prev_rb_joy_) on_stand_press();
   prev_rb_joy_ = rb;
 
   // BaseNode checks the prep gate before changing mode; the task handler
@@ -1237,10 +1248,7 @@ void G1SonicNode::on_gamepad_input() {
 void G1SonicNode::on_gamepad() {
   if (requires_prep() && gamepad_.R1.on_press) restore_stand_reference();
   if (gamepad_.L1.on_press) enter_prep();
-  if (gamepad_.R1.on_press) {
-    enter_stand();
-    RCLCPP_INFO(this->get_logger(), "[GP] -> stand (SONIC @ nominal)");
-  }
+  if (gamepad_.R1.on_press) on_stand_press();
   if (gamepad_.A.on_press) on_button_a();
   if (requires_prep() && control_mode_ != ControlMode::POLICY)
     restore_stand_reference();

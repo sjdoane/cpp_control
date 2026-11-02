@@ -76,6 +76,7 @@ class G1SonicNode : public G1Node {
                                const deploy::TermSpec& spec);
   void make_stand_motion();
   void enter_stand();
+  void on_stand_press();
   void enter_prep();
   void restore_stand_reference();
   virtual bool requires_prep() const { return !planner_ && !calibration_lock_; }
